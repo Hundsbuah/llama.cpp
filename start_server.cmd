@@ -89,7 +89,7 @@ set "LLAMA_ARG_THINK_BUDGET_ENABLE=1"
 set "LLAMA_ARG_THINK_BUDGET=16384"
 set "LLAMA_ARG_THINK_BUDGET_SOFT_RATIO=0.85"
 set "LLAMA_ARG_THINK_BUDGET_SOFT_MESSAGE=I am approaching my reasoning limit. I should consolidate the key points, resolve any remaining uncertainty, and work toward a final answer while I still have room."
-set "LLAMA_ARG_THINK_BUDGET_GRACE_TOKENS=256"
+set "LLAMA_ARG_THINK_BUDGET_GRACE_TOKENS=512"
 set "LLAMA_ARG_THINK_BUDGET_MESSAGE=I have enough information to answer now.\n</think>"
 
 rem Explicitly disable the optional intro injection in the command below.
@@ -119,7 +119,7 @@ echo Top-P:         0.95
 echo Reasoning:     medium
 echo Budget:        16384
 echo Soft warning:  85%%
-echo Grace tokens:  256
+echo Grace tokens:  512
 echo Fit target:     8 MiB
 echo Intro message: disabled
 echo ============================================================
