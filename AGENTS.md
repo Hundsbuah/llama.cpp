@@ -8,6 +8,49 @@
 
 ---
 
+## Graphify
+
+This project has a Graphify knowledge graph at `graphify-out/`.
+
+### Mandatory Graphify-first rule
+
+- For ANY codebase, architecture, dependency, cross-file, call-flow, unfamiliar-code, or repository-structure question, if `graphify-out/graph.json` exists, FIRST use Graphify before broad source-code exploration.
+- Prefer the narrowest applicable Graphify command:
+  - `graphify query "<question>"`
+  - `graphify explain "<concept>"`
+  - `graphify path "<A>" "<B>"`
+- Graphify queries are the primary repository-orientation mechanism. Do not begin such tasks with broad grep, recursive search, mass file reads, or directory-by-directory exploration when a usable graph exists.
+- Use the Graphify result to identify the smallest relevant set of files and symbols, then inspect those actual source files as needed.
+
+### Graph navigation
+
+- If `graphify-out/wiki/index.md` exists, use it for broad navigation instead of browsing raw source files.
+- Read `graphify-out/GRAPH_REPORT.md` only for broad architecture review or when `graphify query`, `graphify explain`, or `graphify path` do not provide enough context.
+- Do not read the entire `graph.json` into context unless there is a specific reason to do so.
+
+### Fallback
+
+Direct repository inspection is allowed when:
+
+- `graphify-out/graph.json` does not exist;
+- Graphify is unavailable or fails;
+- Graphify does not provide enough information;
+- an exact implementation detail must be verified in a file already identified by Graphify;
+- the user explicitly names a specific file to inspect.
+
+When falling back from Graphify, keep repository exploration targeted rather than performing unnecessary broad scans.
+
+### Verification
+
+- Graphify is an orientation and relationship tool, not a substitute for reading the actual implementation.
+- Verify important implementation details against the source files identified by Graphify before modifying code.
+- Do not treat inferred graph relationships as proof of runtime behavior.
+
+### Graph maintenance
+
+- After modifying code files, run `graphify update .` to keep the graph synchronized.
+- If installed Graphify Git hooks have already updated the graph successfully, do not perform a redundant update.
+
 ## Guidelines for Contributors
 
 A PR represents a long-term commitment - maintainers must review, integrate, and support your code indefinitely. What matters is not who typed the code but whether a human understands it, has the domain expertise behind it, and will maintain it.
