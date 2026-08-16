@@ -56,19 +56,83 @@ struct common_reasoning_budget_ctx {
     token_matcher end_matcher;
     llama_tokens forced_tokens;
 
-    int32_t budget;           // maximum tokens in reasoning block
-    int32_t remaining;        // tokens remaining in budget
+    int32_t budget;
+    int32_t remaining;
 
     common_reasoning_budget_state state;
 
-    // for forcing
-    size_t force_pos;         // next position in forced_tokens to force
+    size_t force_pos;
+    int32_t end_match;
 
-    int32_t end_match;        // index into end_matcher.seqs of the sequence that transitioned to DONE, -1 if none
+    llama_tokens soft_forced_tokens;
+    bool    soft_enabled;
+    int32_t soft_threshold;
+    bool    soft_triggered;
+    size_t  soft_force_pos;
+
+    llama_tokens intro_forced_tokens;
+    size_t  intro_force_pos;
+
+    int32_t grace_tokens;
+    int32_t grace_remaining;
+    bool    hard_pending_prev_nl;
 };
 
 static const char * common_reasoning_budget_name(const struct llama_sampler * /*smpl*/) {
     return "reasoning-budget";
+}
+
+static bool token_utf8_complete(const common_reasoning_budget_ctx * ctx, llama_token token) {
+    if (ctx->vocab == nullptr) {
+        return true;
+    }
+    const std::string piece = common_token_to_piece(ctx->vocab, token, false);
+    return common_utf8_is_complete(piece);
+}
+
+// Preserve upstream's UTF-8-safe hard cutoff behavior for every path that
+// decides to begin the hard forced sequence.
+static void common_reasoning_budget_begin_forcing(common_reasoning_budget_ctx * ctx, llama_token token) {
+    ctx->end_matcher.reset();
+    if (token_utf8_complete(ctx, token)) {
+        ctx->state = REASONING_BUDGET_FORCING;
+        ctx->force_pos = 0;
+    } else {
+        ctx->state = REASONING_BUDGET_WAITING_UTF8;
+    }
+}
+
+static void common_reasoning_budget_enter_hard_exhausted(common_reasoning_budget_ctx * ctx, llama_token token) {
+    if (ctx->grace_tokens > 0) {
+        ctx->state = REASONING_BUDGET_HARD_PENDING;
+        ctx->grace_remaining = ctx->grace_tokens;
+        ctx->hard_pending_prev_nl = false;
+        ctx->end_matcher.reset();
+        COM_TRC("budget exhausted, waiting up to %d tokens for a paragraph break\n", ctx->grace_tokens);
+        return;
+    }
+
+    common_reasoning_budget_begin_forcing(ctx, token);
+    COM_TRC("%s", "budget exhausted, forcing end sequence\n");
+}
+
+static void common_reasoning_budget_activate(common_reasoning_budget_ctx * ctx) {
+    ctx->remaining = ctx->budget;
+    ctx->soft_triggered = false;
+    ctx->end_match = -1;
+
+    if (!ctx->intro_forced_tokens.empty()) {
+        ctx->state = REASONING_BUDGET_INTRO_FORCING;
+        ctx->intro_force_pos = 0;
+        COM_TRC("activated, budget=%d tokens, forcing intro message\n", ctx->budget);
+    } else if (ctx->remaining <= 0) {
+        ctx->state = REASONING_BUDGET_FORCING;
+        ctx->force_pos = 0;
+        COM_TRC("%s", "budget=0, forcing immediately\n");
+    } else {
+        ctx->state = REASONING_BUDGET_COUNTING;
+        COM_TRC("activated, budget=%d tokens\n", ctx->budget);
+    }
 }
 
 static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_token token) {
@@ -78,19 +142,111 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
         case REASONING_BUDGET_IDLE:
         {
             if (ctx->start_matcher.advance(token) >= 0) {
-                ctx->state = REASONING_BUDGET_COUNTING;
-                ctx->remaining = ctx->budget;
-                COM_TRC("activated, budget=%d tokens\n", ctx->budget);
+                common_reasoning_budget_activate(ctx);
+            }
+            break;
+        }
 
+        case REASONING_BUDGET_INTRO_FORCING:
+            ctx->intro_force_pos++;
+            if (ctx->intro_force_pos >= ctx->intro_forced_tokens.size()) {
                 if (ctx->remaining <= 0) {
                     ctx->state = REASONING_BUDGET_FORCING;
                     ctx->force_pos = 0;
-                    COM_TRC("%s", "budget=0, forcing immediately\n");
+                    COM_TRC("%s", "intro complete, budget=0, forcing immediately\n");
+                } else {
+                    ctx->state = REASONING_BUDGET_COUNTING;
+                    COM_TRC("%s", "intro complete, resuming countdown\n");
+                }
+            }
+            break;
+
+        case REASONING_BUDGET_COUNTING:
+        {
+            const int32_t match = ctx->end_matcher.advance(token);
+            if (match >= 0) {
+                ctx->state = REASONING_BUDGET_DONE;
+                ctx->end_match = match;
+                COM_TRC("%s", "deactivated (natural end)\n");
+                break;
+            }
+
+            ctx->remaining--;
+            if (ctx->remaining <= 0) {
+                common_reasoning_budget_enter_hard_exhausted(ctx, token);
+                break;
+            }
+
+            if (ctx->soft_enabled && !ctx->soft_triggered && ctx->remaining <= ctx->soft_threshold) {
+                ctx->state = REASONING_BUDGET_SOFT_PENDING;
+                COM_TRC("soft threshold reached, remaining=%d, waiting for newline\n", ctx->remaining);
+            }
+            break;
+        }
+
+        case REASONING_BUDGET_SOFT_PENDING:
+        {
+            const int32_t match = ctx->end_matcher.advance(token);
+            if (match >= 0) {
+                ctx->state = REASONING_BUDGET_DONE;
+                ctx->end_match = match;
+                COM_TRC("%s", "deactivated (natural end)\n");
+                break;
+            }
+
+            ctx->remaining--;
+            if (ctx->remaining <= 0) {
+                COM_TRC("%s", "budget exhausted before newline, soft warning skipped\n");
+                common_reasoning_budget_enter_hard_exhausted(ctx, token);
+                break;
+            }
+
+            if (ctx->vocab != nullptr) {
+                const std::string piece = common_token_to_piece(ctx->vocab, token, false);
+                if (piece.find('\n') != std::string::npos) {
+                    ctx->state = REASONING_BUDGET_SOFT_FORCING;
+                    ctx->soft_force_pos = 0;
+                    ctx->soft_triggered = true;
+                    COM_TRC("%s", "newline boundary found, forcing soft warning\n");
                 }
             }
             break;
         }
-        case REASONING_BUDGET_COUNTING:
+
+        case REASONING_BUDGET_SOFT_FORCING:
+            ctx->soft_force_pos++;
+            if (ctx->soft_force_pos >= ctx->soft_forced_tokens.size()) {
+                ctx->state = REASONING_BUDGET_COUNTING;
+                COM_TRC("%s", "soft warning complete, resuming countdown\n");
+            }
+            break;
+
+        case REASONING_BUDGET_HARD_PENDING:
+        {
+            const int32_t match = ctx->end_matcher.advance(token);
+            if (match >= 0) {
+                ctx->state = REASONING_BUDGET_DONE;
+                ctx->end_match = match;
+                COM_TRC("%s", "deactivated (natural end)\n");
+                break;
+            }
+
+            ctx->grace_remaining--;
+            const std::string piece = ctx->vocab != nullptr ? common_token_to_piece(ctx->vocab, token, false) : std::string();
+            const bool paragraph_boundary = piece.find("\n\n") != std::string::npos ||
+                (ctx->hard_pending_prev_nl && !piece.empty() && piece[0] == '\n');
+            ctx->hard_pending_prev_nl = !piece.empty() && piece.back() == '\n';
+
+            if (paragraph_boundary) {
+                common_reasoning_budget_begin_forcing(ctx, token);
+                COM_TRC("%s", "paragraph boundary found, forcing end sequence\n");
+            } else if (ctx->grace_remaining <= 0) {
+                common_reasoning_budget_begin_forcing(ctx, token);
+                COM_TRC("%s", "grace period expired, forcing end sequence\n");
+            }
+            break;
+        }
+
         case REASONING_BUDGET_WAITING_UTF8:
         {
             const int32_t match = ctx->end_matcher.advance(token);
@@ -101,39 +257,15 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                 break;
             }
 
-            bool utf8_complete = true;
-            if (ctx->vocab != nullptr) {
-                const std::string piece = common_token_to_piece(ctx->vocab, token, false);
-                utf8_complete = common_utf8_is_complete(piece);
-            }
-
-            if (ctx->state == REASONING_BUDGET_WAITING_UTF8) {
-                if (utf8_complete) {
-                    ctx->state = REASONING_BUDGET_FORCING;
-                    ctx->force_pos = 0;
-                    ctx->end_matcher.reset();
-                    COM_TRC("%s", "UTF-8 complete, now forcing end sequence\n");
-                }
-            } else if (ctx->state == REASONING_BUDGET_COUNTING) {
-                ctx->remaining--;
-                if (ctx->remaining <= 0) {
-                    if (utf8_complete) {
-                        ctx->state = REASONING_BUDGET_FORCING;
-                        ctx->force_pos = 0;
-                        ctx->end_matcher.reset();
-                        COM_TRC("%s", "budget exhausted, forcing end sequence\n");
-                    } else {
-                        ctx->state = REASONING_BUDGET_WAITING_UTF8;
-                        ctx->end_matcher.reset();
-                        COM_TRC("%s", "budget exhausted, waiting for UTF-8 completion\n");
-                    }
-                }
+            if (token_utf8_complete(ctx, token)) {
+                common_reasoning_budget_begin_forcing(ctx, token);
+                COM_TRC("%s", "UTF-8 complete, now forcing end sequence\n");
             }
             break;
         }
+
         case REASONING_BUDGET_FORCING:
         {
-            // track the end sequence within forced_tokens so it is also reported on DONE
             const int32_t match = ctx->end_matcher.advance(token);
             ctx->force_pos++;
             if (ctx->force_pos >= ctx->forced_tokens.size()) {
@@ -143,21 +275,11 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
             }
             break;
         }
-        case REASONING_BUDGET_DONE:
-            // Re-arm on a new start tag: some models emit multiple <think> blocks
-            // per response, and each should get a fresh budget window.
-            if (ctx->start_matcher.advance(token) >= 0) {
-                ctx->state = REASONING_BUDGET_COUNTING;
-                ctx->remaining = ctx->budget;
-                ctx->end_matcher.reset();
-                ctx->end_match = -1;
-                COM_TRC("re-activated on new start tag, budget=%d tokens\n", ctx->budget);
 
-                if (ctx->remaining <= 0) {
-                    ctx->state = REASONING_BUDGET_FORCING;
-                    ctx->force_pos = 0;
-                    COM_TRC("%s", "budget=0, forcing immediately\n");
-                }
+        case REASONING_BUDGET_DONE:
+            if (ctx->start_matcher.advance(token) >= 0) {
+                ctx->end_matcher.reset();
+                common_reasoning_budget_activate(ctx);
             }
             break;
     }
@@ -166,18 +288,26 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
 static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
 
-    if (ctx->state != REASONING_BUDGET_FORCING) {
-        // passthrough — don't modify logits
+    llama_token forced;
+    if (ctx->state == REASONING_BUDGET_FORCING) {
+        if (ctx->force_pos >= ctx->forced_tokens.size()) {
+            return;
+        }
+        forced = ctx->forced_tokens[ctx->force_pos];
+    } else if (ctx->state == REASONING_BUDGET_SOFT_FORCING) {
+        if (ctx->soft_force_pos >= ctx->soft_forced_tokens.size()) {
+            return;
+        }
+        forced = ctx->soft_forced_tokens[ctx->soft_force_pos];
+    } else if (ctx->state == REASONING_BUDGET_INTRO_FORCING) {
+        if (ctx->intro_force_pos >= ctx->intro_forced_tokens.size()) {
+            return;
+        }
+        forced = ctx->intro_forced_tokens[ctx->intro_force_pos];
+    } else {
         return;
     }
 
-    if (ctx->force_pos >= ctx->forced_tokens.size()) {
-        return;
-    }
-
-    const llama_token forced = ctx->forced_tokens[ctx->force_pos];
-
-    // set all logits to -inf except the forced token
     for (size_t i = 0; i < cur_p->size; i++) {
         if (cur_p->data[i].id != forced) {
             cur_p->data[i].logit = -INFINITY;
@@ -193,12 +323,18 @@ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     ctx->end_matcher.reset();
     ctx->force_pos = 0;
     ctx->end_match = -1;
+    ctx->soft_triggered = false;
+    ctx->soft_force_pos = 0;
+    ctx->intro_force_pos = 0;
+    ctx->grace_remaining = ctx->grace_tokens;
+    ctx->hard_pending_prev_nl = false;
 }
 
 static struct llama_sampler * common_reasoning_budget_init_state(
         const struct llama_vocab * vocab, const std::vector<llama_tokens> & start_seqs,
         const std::vector<llama_tokens> & end_seqs, const llama_tokens & forced_tokens,
-        int32_t budget, common_reasoning_budget_state initial_state);
+        const llama_tokens & soft_forced_tokens, const llama_tokens & intro_forced_tokens,
+        int32_t budget, float soft_ratio, int32_t grace_tokens, common_reasoning_budget_state initial_state);
 
 static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl);
 
@@ -235,25 +371,45 @@ static struct llama_sampler * common_reasoning_budget_init_state(
         const std::vector<llama_tokens> & start_seqs,
         const std::vector<llama_tokens> & end_seqs,
         const llama_tokens              & forced_tokens,
+        const llama_tokens              & soft_forced_tokens,
+        const llama_tokens              & intro_forced_tokens,
         int32_t                           budget,
+        float                             soft_ratio,
+        int32_t                           grace_tokens,
         common_reasoning_budget_state     initial_state) {
-    // promote COUNTING with budget <= 0 to FORCING
     if (initial_state == REASONING_BUDGET_COUNTING && budget <= 0) {
         initial_state = REASONING_BUDGET_FORCING;
+    }
+
+    const bool soft_enabled = soft_ratio > 0.0f && !soft_forced_tokens.empty();
+    int32_t soft_threshold = 0;
+    if (soft_enabled) {
+        const float ratio = std::min(soft_ratio, 1.0f);
+        soft_threshold = std::max(0, budget - (int32_t) std::ceil(budget * ratio));
     }
 
     return llama_sampler_init(
         /* .iface = */ &common_reasoning_budget_i,
         /* .ctx   = */ new common_reasoning_budget_ctx {
-            /* .vocab         = */ vocab,
-            /* .start_matcher = */ token_matcher(start_seqs),
-            /* .end_matcher   = */ token_matcher(end_seqs),
-            /* .forced_tokens = */ forced_tokens,
-            /* .budget        = */ budget,
-            /* .remaining     = */ budget,
-            /* .state         = */ initial_state,
-            /* .force_pos     = */ 0,
-            /* .end_match     = */ -1,
+            /* .vocab                = */ vocab,
+            /* .start_matcher        = */ token_matcher(start_seqs),
+            /* .end_matcher          = */ token_matcher(end_seqs),
+            /* .forced_tokens        = */ forced_tokens,
+            /* .budget               = */ budget,
+            /* .remaining            = */ budget,
+            /* .state                = */ initial_state,
+            /* .force_pos            = */ 0,
+            /* .end_match            = */ -1,
+            /* .soft_forced_tokens   = */ soft_forced_tokens,
+            /* .soft_enabled         = */ soft_enabled,
+            /* .soft_threshold       = */ soft_threshold,
+            /* .soft_triggered       = */ false,
+            /* .soft_force_pos       = */ 0,
+            /* .intro_forced_tokens  = */ intro_forced_tokens,
+            /* .intro_force_pos      = */ 0,
+            /* .grace_tokens         = */ grace_tokens,
+            /* .grace_remaining      = */ grace_tokens,
+            /* .hard_pending_prev_nl = */ false,
         }
     );
 }
@@ -263,16 +419,33 @@ struct llama_sampler * common_reasoning_budget_init(
         const std::vector<llama_tokens> & start_seqs,
         const std::vector<llama_tokens> & end_seqs,
         const llama_tokens              & forced_tokens,
+        const llama_tokens              & soft_forced_tokens,
+        const llama_tokens              & intro_forced_tokens,
+        int32_t                           budget,
+        float                             soft_ratio,
+        int32_t                           grace_tokens,
+        common_reasoning_budget_state     initial_state) {
+    return common_reasoning_budget_init_state(
+        vocab, start_seqs, end_seqs, forced_tokens, soft_forced_tokens, intro_forced_tokens,
+        budget, soft_ratio, grace_tokens, initial_state);
+}
+
+struct llama_sampler * common_reasoning_budget_init(
+        const struct llama_vocab        * vocab,
+        const std::vector<llama_tokens> & start_seqs,
+        const std::vector<llama_tokens> & end_seqs,
+        const llama_tokens              & forced_tokens,
         int32_t                           budget,
         common_reasoning_budget_state     initial_state) {
-    return common_reasoning_budget_init_state(vocab, start_seqs, end_seqs, forced_tokens, budget, initial_state);
+    return common_reasoning_budget_init(
+        vocab, start_seqs, end_seqs, forced_tokens, {}, {}, budget, -1.0f, 0, initial_state);
 }
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl) {
     if (!smpl) {
         return REASONING_BUDGET_IDLE;
     }
-    return ((const common_reasoning_budget_ctx *)smpl->ctx)->state;
+    return ((const common_reasoning_budget_ctx *) smpl->ctx)->state;
 }
 
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl) {
@@ -284,7 +457,6 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
     if (ctx->end_match < 0) {
         return nullptr;
     }
-
     return &ctx->end_matcher.seqs[ctx->end_match];
 }
 
@@ -294,10 +466,11 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
     }
 
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
-
-    // only a sampler that is actively counting down the budget may be forced;
-    // any other state (idle, already forcing/waiting, or done) is left untouched
-    if (ctx->state != REASONING_BUDGET_COUNTING) {
+    if (ctx->state != REASONING_BUDGET_COUNTING &&
+        ctx->state != REASONING_BUDGET_INTRO_FORCING &&
+        ctx->state != REASONING_BUDGET_SOFT_PENDING &&
+        ctx->state != REASONING_BUDGET_SOFT_FORCING &&
+        ctx->state != REASONING_BUDGET_HARD_PENDING) {
         return false;
     }
 
@@ -305,6 +478,5 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
     ctx->force_pos = 0;
     ctx->end_matcher.reset();
     COM_TRC("%s", "forced into forcing state (manual transition)\n");
-
     return true;
 }

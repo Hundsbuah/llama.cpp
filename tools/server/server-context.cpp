@@ -1436,6 +1436,10 @@ private:
                 /* enable_thinking       */ enable_thinking,
                 /* reasoning_budget      */ params_base.sampling.reasoning_budget_tokens,
                 /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
+                /* reasoning_budget_soft_ratio */ params_base.sampling.reasoning_budget_soft_ratio,
+                /* reasoning_budget_soft_msg   */ params_base.sampling.reasoning_budget_soft_message,
+                /* reasoning_budget_intro_msg  */ params_base.sampling.reasoning_budget_intro_message,
+                /* reasoning_budget_grace_toks */ params_base.sampling.reasoning_budget_grace_tokens,
                 /* media_path            */ params_base.media_path,
                 /* force_pure_content    */ params_base.force_pure_content_parser
             };
@@ -2394,16 +2398,22 @@ private:
                     }
 
                     if (task.params.control_action == "reasoning_end") {
-                        // the budget sampler only exists when reasoning control was armed
-                        if (!slot->task->params.sampling.reasoning_control) {
+                        // Runtime control is part of the reasoning-budget feature and must
+                        // obey both the global master switch and the per-request arm flag.
+                        if (!slot->task->params.sampling.reasoning_budget_enabled ||
+                            !slot->task->params.sampling.reasoning_control) {
                             res->success = false;
                             res->message = "reasoning control not enabled for this completion";
                             queue_results.send(std::move(res));
                             break;
                         }
-                        // act on the live slot mid generation, never defer
-                        common_sampler_reasoning_budget_force(slot->smpl.get());
-                        res->success = true;
+
+                        // Act on the live slot mid generation. Report failure if the
+                        // sampler is not currently in a forceable reasoning state.
+                        res->success = common_sampler_reasoning_budget_force(slot->smpl.get());
+                        if (!res->success) {
+                            res->message = "reasoning block is not currently forceable";
+                        }
                     } else {
                         res->success = false;
                         res->message = "unknown control action";

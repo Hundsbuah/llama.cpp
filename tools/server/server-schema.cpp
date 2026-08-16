@@ -384,6 +384,26 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("Number of tokens in the reasoning budget (-1 = disabled)"));
 
+    add((new field_num("reasoning_budget_soft_ratio", params.sampling.reasoning_budget_soft_ratio))
+        ->set_hard_limits(-1.0f, 1.0f)
+        ->set_desc("Fraction of the reasoning budget consumed at which to inject a soft warning (<= 0 = disabled)"));
+
+    add((new field_str("reasoning_budget_intro_message"))
+        ->set_desc("Message forced when the reasoning block starts. Use {budget} as a placeholder for reasoning_budget_tokens")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            GGML_ASSERT(ctx.vocab != nullptr);
+            std::string message = data.at("reasoning_budget_intro_message").get<std::string>();
+            const std::string budget_str = std::to_string(ctx.params.sampling.reasoning_budget_tokens);
+            for (size_t pos = 0; (pos = message.find("{budget}", pos)) != std::string::npos; pos += budget_str.size()) {
+                message.replace(pos, 8, budget_str);
+            }
+            ctx.params.sampling.reasoning_budget_intro_forced = common_tokenize(ctx.vocab, message, false, true);
+        }));
+
+    add((new field_num("reasoning_budget_grace_tokens", params.sampling.reasoning_budget_grace_tokens))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Maximum generated tokens to wait for a paragraph break after hard-budget exhaustion (0 = force immediately)"));
+
     add((new field_str("reasoning_budget_start_tag"))
         ->set_desc("Token string marking the start of the reasoning budget section")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
@@ -413,18 +433,27 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         }));
 
     add((new field_str("reasoning_budget_message"))
-        ->set_desc("Message to prepend to the reasoning budget end tag when forcing it")
+        ->set_desc("Hard-cutoff message. A non-empty message must include the model closing tag; if empty, the first auto-detected closing tag is forced")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            if (!ctx.params.sampling.reasoning_budget_end.empty()) {
-                llama_tokens end_tag = ctx.params.sampling.reasoning_budget_end.front();
-                std::string message = json_value(data, "reasoning_budget_message", std::string());
-                if (!message.empty()) {
-                    llama_tokens message_tokens = common_tokenize(ctx.vocab, message, false, true);
-                    end_tag.insert(end_tag.begin(), message_tokens.begin(), message_tokens.end());
+            const std::string message = data.at("reasoning_budget_message").get<std::string>();
+            if (message.empty()) {
+                if (!ctx.params.sampling.reasoning_budget_end.empty()) {
+                    ctx.params.sampling.reasoning_budget_forced = ctx.params.sampling.reasoning_budget_end.front();
+                } else {
+                    ctx.params.sampling.reasoning_budget_forced.clear();
                 }
-                ctx.params.sampling.reasoning_budget_forced = std::move(end_tag);
+            } else {
+                ctx.params.sampling.reasoning_budget_forced = common_tokenize(ctx.vocab, message, false, true);
             }
+        }));
+
+    add((new field_str("reasoning_budget_soft_message"))
+        ->set_desc("Soft-warning message injected partway through the reasoning budget at the next newline boundary")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            GGML_ASSERT(ctx.vocab != nullptr);
+            const std::string message = data.at("reasoning_budget_soft_message").get<std::string>();
+            ctx.params.sampling.reasoning_budget_soft_forced = common_tokenize(ctx.vocab, message, false, true);
         }));
 
     add((new field_json("logit_bias"))
@@ -556,11 +585,16 @@ task_params eval_llama_cmpl_schema(
     // debugging
     {
         auto budget = params.sampling.reasoning_budget_tokens;
-        SRV_DBG("reasoning budget: tokens=%d, generation_prompt='%s', start=%zu toks, end=%zu seqs, forced=%zu toks\n",
+        SRV_DBG("reasoning budget: enabled=%d, tokens=%d, generation_prompt='%s', start=%zu toks, end=%zu seqs, forced=%zu toks, soft_ratio=%.2f, soft_forced=%zu toks, intro_forced=%zu toks, grace_tokens=%d\n",
+                params.sampling.reasoning_budget_enabled ? 1 : 0,
                 budget, params.sampling.generation_prompt.c_str(),
                 params.sampling.reasoning_budget_start.size(),
                 params.sampling.reasoning_budget_end.size(),
-                params.sampling.reasoning_budget_forced.size());
+                params.sampling.reasoning_budget_forced.size(),
+                params.sampling.reasoning_budget_soft_ratio,
+                params.sampling.reasoning_budget_soft_forced.size(),
+                params.sampling.reasoning_budget_intro_forced.size(),
+                params.sampling.reasoning_budget_grace_tokens);
     }
 
     return params;

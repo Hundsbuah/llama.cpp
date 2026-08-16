@@ -1332,7 +1332,8 @@ json oaicompat_chat_params_parse(
 
     llama_params["message_delimiters"] = chat_params.message_delimiters.to_json();
 
-    // Reasoning budget: pass parameters through to sampling layer
+    // Reasoning budget: pass request/global parameters through to the sampling layer.
+    // The actual feature remains gated by params_base.sampling.reasoning_budget_enabled.
     {
         int reasoning_budget = json_value(body, "reasoning_budget_tokens",
                                json_value(body, "thinking_budget_tokens", -1));
@@ -1340,12 +1341,33 @@ json oaicompat_chat_params_parse(
             reasoning_budget = opt.reasoning_budget;
         }
 
+        const bool reasoning_control = json_value(body, "reasoning_control", false);
         if (!chat_params.thinking_end_tags.empty()) {
             llama_params["reasoning_budget_tokens"] = reasoning_budget;
             llama_params["reasoning_budget_start_tag"] = chat_params.thinking_start_tag;
             llama_params["reasoning_budget_end_tags"] = chat_params.thinking_end_tags;
-            llama_params["reasoning_budget_message"] = json_value(body, "reasoning_budget_message", opt.reasoning_budget_message);
-            llama_params["reasoning_control"] = json_value(body, "reasoning_control", false);
+            llama_params["reasoning_control"] = reasoning_control;
+
+            const bool has_per_request_reasoning = reasoning_budget >= 0
+                || reasoning_control
+                || body.contains("reasoning_budget_message")
+                || body.contains("reasoning_budget_soft_ratio")
+                || body.contains("reasoning_budget_soft_message")
+                || body.contains("reasoning_budget_intro_message")
+                || body.contains("reasoning_budget_grace_tokens");
+
+            if (has_per_request_reasoning) {
+                llama_params["reasoning_budget_message"] =
+                    json_value(body, "reasoning_budget_message", opt.reasoning_budget_message);
+                llama_params["reasoning_budget_soft_ratio"] =
+                    json_value(body, "reasoning_budget_soft_ratio", opt.reasoning_budget_soft_ratio);
+                llama_params["reasoning_budget_soft_message"] =
+                    json_value(body, "reasoning_budget_soft_message", opt.reasoning_budget_soft_message);
+                llama_params["reasoning_budget_intro_message"] =
+                    json_value(body, "reasoning_budget_intro_message", opt.reasoning_budget_intro_message);
+                llama_params["reasoning_budget_grace_tokens"] =
+                    json_value(body, "reasoning_budget_grace_tokens", opt.reasoning_budget_grace_tokens);
+            }
         }
     }
 

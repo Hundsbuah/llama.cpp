@@ -307,18 +307,41 @@ struct common_sampler * common_sampler_init(
         }
     }
 
-    // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    // The master switch gates budget/soft/intro/grace and runtime reasoning_control.
+    // grammar_lazy still needs the reasoning-block tracker independently, so it is not gated.
+    const bool reasoning_budget_active = params.reasoning_budget_enabled &&
+        (params.reasoning_budget_tokens >= 0 || params.reasoning_control);
+    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() &&
+        (params.grammar_lazy || reasoning_budget_active)) {
+        // If the sampler exists only for grammar_lazy tracking, keep all budget-control
+        // behavior inert. This makes the master switch authoritative even when a lazy
+        // grammar independently needs start/end reasoning-block state tracking.
+        const bool controls_active = reasoning_budget_active;
+        const bool finite_budget_active = controls_active && params.reasoning_budget_tokens >= 0;
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
             params.reasoning_budget_end,
-            params.reasoning_budget_forced,
-            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+            controls_active      ? params.reasoning_budget_forced       : llama_tokens {},
+            finite_budget_active ? params.reasoning_budget_soft_forced  : llama_tokens {},
+            finite_budget_active ? params.reasoning_budget_intro_forced : llama_tokens {},
+            finite_budget_active ? params.reasoning_budget_tokens : INT_MAX,
+            finite_budget_active ? params.reasoning_budget_soft_ratio : -1.0f,
+            finite_budget_active ? params.reasoning_budget_grace_tokens : 0);
 
         for (const auto & token : prefill_tokens) {
             llama_sampler_accept(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+
+            // Prompt-prefilled text is fixed input, not generated output. Once it
+            // activates a forced sequence, stop replaying or those prompt tokens
+            // would incorrectly consume positions in that forced sequence.
+            const auto state = common_reasoning_budget_get_state(rbudget);
+            if (state == REASONING_BUDGET_INTRO_FORCING ||
+                state == REASONING_BUDGET_SOFT_FORCING ||
+                state == REASONING_BUDGET_FORCING) {
+                break;
+            }
         }
     }
 
