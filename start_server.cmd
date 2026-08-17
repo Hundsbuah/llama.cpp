@@ -3,21 +3,75 @@ setlocal EnableExtensions DisableDelayedExpansion
 title llama-server
 
 rem ============================================================
-rem This CMD contains the qwen3.8-safe-v2 Jinja template internally.
+rem Chat-template source policy
+rem ============================================================
+rem Global switch: Fetch latest templates online at startup
+rem   0 = OFFLINE: always use the embedded qwen3.8-safe-v2 template
+rem       with the local medium-reasoning patch. No template choice
+rem       exists in offline mode and no network request is made.
+rem   1 = ONLINE: fetch exactly one selected upstream template on every
+rem       startup. If download or validation fails, startup aborts.
+set "FETCH_LATEST_TEMPLATES_ONLINE=1"
+rem
+rem Online template selector. Used ONLY when
+rem FETCH_LATEST_TEMPLATES_ONLINE=1.
+rem Valid values:
+rem   qwen-sharp = peculiar-ragdoll/Qwen-Sharp-Chat-Templates
+rem   froggeric  = froggeric/Qwen-Fixed-Chat-Templates
+set "ONLINE_CHAT_TEMPLATE=qwen-sharp"
+rem ============================================================
+
+rem This CMD contains only the offline qwen3.8-safe-v2 medium-patched
+rem Jinja template internally. Online templates are never embedded.
 rem Put only this CMD in the repository root, e.g.:
 rem Expected server:
 rem   build\bin\Release\llama-server.exe
-rem ============================================================
 
 cd /d "%~dp0"
 
 rem ---------- Paths ----------
 set "SERVER=%~dp0build\bin\Release\llama-server.exe"
 set "SELF=%~f0"
-set "TEMPLATE=%TEMP%\qwen3.8-safe-v2-%RANDOM%-%RANDOM%.jinja"
 set "MODEL_ROOT=%USERPROFILE%\.lmstudio\models"
 set "MODEL_NAME=Qwen3.8-27B-UD-Q4_K_XL.gguf"
 set "MODEL="
+
+rem ---------- Validate global update switch ----------
+if not "%FETCH_LATEST_TEMPLATES_ONLINE%"=="0" if not "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" (
+    echo ERROR: FETCH_LATEST_TEMPLATES_ONLINE must be 0 or 1.
+    echo Current value: "%FETCH_LATEST_TEMPLATES_ONLINE%"
+    pause
+    exit /b 1
+)
+
+rem ---------- Resolve chat-template source ----------
+set "TEMPLATE=%TEMP%\qwen3.8-chat-template-%RANDOM%-%RANDOM%.jinja"
+set "TEMPLATE_BEGIN=:__QWEN38_SAFE_V2_BEGIN__"
+set "TEMPLATE_END=:__QWEN38_SAFE_V2_END__"
+set "TEMPLATE_LIVE_URL="
+set "TEMPLATE_LABEL="
+set "TEMPLATE_SOURCE="
+set "TEMPLATE_KWARGS_MODE=enable_thinking=true, preserve_thinking=true, reasoning_effort=medium"
+
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="0" set "TEMPLATE_LABEL=qwen3.8-safe-v2 + medium fix"
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="0" set "TEMPLATE_SOURCE=EMBEDDED offline safe-v2 medium-patched snapshot"
+
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="qwen-sharp" set "TEMPLATE_LABEL=peculiar-ragdoll/Qwen-Sharp-Chat-Templates"
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="qwen-sharp" set "TEMPLATE_LIVE_URL=https://huggingface.co/peculiar-ragdoll/Qwen-Sharp-Chat-Templates/raw/main/chat_template.jinja"
+
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="froggeric" set "TEMPLATE_LABEL=froggeric/Qwen-Fixed-Chat-Templates"
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="froggeric" set "TEMPLATE_LIVE_URL=https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja"
+
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if not defined TEMPLATE_LIVE_URL (
+    echo ERROR: Unknown ONLINE_CHAT_TEMPLATE value:
+    echo   "%ONLINE_CHAT_TEMPLATE%"
+    echo.
+    echo Valid online values:
+    echo   qwen-sharp
+    echo   froggeric
+    pause
+    exit /b 1
+)
 
 rem ---------- Locate model automatically ----------
 if exist "%MODEL_ROOT%" (
@@ -36,18 +90,35 @@ if not exist "%SERVER%" (
     exit /b 1
 )
 
-rem ---------- Extract embedded Jinja template ----------
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$raw=[IO.File]::ReadAllText($env:SELF);" ^
-  "$marker=':__QWEN38_JINJA_PAYLOAD__';" ^
-  "$p=$raw.LastIndexOf($marker);" ^
-  "if($p -lt 0){exit 1};" ^
-  "$tpl=$raw.Substring($p+$marker.Length).TrimStart([char]13,[char]10);" ^
-  "[IO.File]::WriteAllText($env:TEMPLATE,$tpl,[Text.UTF8Encoding]::new($false))"
-if errorlevel 1 (
-    echo ERROR: Embedded Jinja template could not be extracted.
-    pause
-    exit /b 1
+rem ---------- Materialize Jinja template ----------
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" (
+    echo Fetching latest selected chat template online...
+    echo   %TEMPLATE_LIVE_URL%
+    rem IMPORTANT: Never place a literal percent sign in this inline PowerShell command.
+    rem cmd.exe performs percent expansion before PowerShell sees the text, including
+    rem across this parenthesized IF block. Build the Jinja opener with [char]37 instead.
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;$headers=@{'User-Agent'='Qwen38-llama-server-template-fetch/2.1';'Cache-Control'='no-cache';'Pragma'='no-cache'};$r=Invoke-WebRequest -UseBasicParsing -Uri $env:TEMPLATE_LIVE_URL -Headers $headers -TimeoutSec 30;$tpl=[string]$r.Content;if([string]::IsNullOrWhiteSpace($tpl) -or $tpl.Length -lt 4096){throw 'Downloaded template is empty or implausibly small.'};$trim=$tpl.TrimStart();if($trim.StartsWith('<!DOCTYPE',[StringComparison]::OrdinalIgnoreCase) -or $trim.StartsWith('<html',[StringComparison]::OrdinalIgnoreCase)){throw 'Remote endpoint returned HTML instead of a Jinja template.'};$jinjaOpener='{'+[char]37+'-';foreach($needle in @($jinjaOpener,'messages','<|im_start|>','add_generation_prompt','reasoning_effort','preserve_thinking')){if($tpl.IndexOf($needle,[StringComparison]::Ordinal) -lt 0){throw ('Downloaded content failed compatibility validation; missing token: '+$needle)}};[IO.File]::WriteAllText($env:TEMPLATE,$tpl,[Text.UTF8Encoding]::new($false));exit 0}catch{[Console]::Error.WriteLine('Template download/validation failed: '+$_.Exception.Message);exit 21}"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Latest online chat template could not be downloaded or validated.
+        echo Template: %TEMPLATE_LABEL%
+        echo URL:      %TEMPLATE_LIVE_URL%
+        echo.
+        echo Strict online mode is enabled. No embedded fallback is used in online mode.
+        echo Set FETCH_LATEST_TEMPLATES_ONLINE=0 to intentionally use the embedded
+        echo qwen3.8-safe-v2 medium-patched offline template.
+        del /q "%TEMPLATE%" >nul 2>&1
+        pause
+        exit /b 1
+    )
+    set "TEMPLATE_SOURCE=LIVE latest upstream"
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$raw=[IO.File]::ReadAllText($env:SELF);$begin=$env:TEMPLATE_BEGIN;$end=$env:TEMPLATE_END;$p=$raw.LastIndexOf($begin,[StringComparison]::Ordinal);if($p -lt 0){exit 11};$p+=$begin.Length;if($p+1 -lt $raw.Length -and $raw[$p] -eq [char]13 -and $raw[$p+1] -eq [char]10){$p+=2}elseif($p -lt $raw.Length -and $raw[$p] -eq [char]10){$p+=1}else{exit 12};$q=$raw.IndexOf($end,$p,[StringComparison]::Ordinal);if($q -lt 0){exit 13};$tpl=$raw.Substring($p,$q-$p);if($tpl.Length -ge 2 -and $tpl[$tpl.Length-2] -eq [char]13 -and $tpl[$tpl.Length-1] -eq [char]10){$tpl=$tpl.Substring(0,$tpl.Length-2)}elseif($tpl.Length -ge 1 -and $tpl[$tpl.Length-1] -eq [char]10){$tpl=$tpl.Substring(0,$tpl.Length-1)};if([string]::IsNullOrWhiteSpace($tpl) -or $tpl.IndexOf('qwen3.8-safe-v2',[StringComparison]::Ordinal) -lt 0){exit 14};[IO.File]::WriteAllText($env:TEMPLATE,$tpl,[Text.UTF8Encoding]::new($false))"
+    if errorlevel 1 (
+        echo ERROR: Embedded qwen3.8-safe-v2 medium-patched template could not be extracted.
+        pause
+        exit /b 1
+    )
 )
 
 if not exist "%TEMPLATE%" (
@@ -57,11 +128,15 @@ if not exist "%TEMPLATE%" (
     exit /b 1
 )
 
+rem Record the exact template payload used for reproducibility/debugging.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$h=(Get-FileHash -LiteralPath $env:TEMPLATE -Algorithm SHA256).Hash;Write-Host ('Template SHA256: '+$h)"
+
 if not defined MODEL (
     echo ERROR: Model not found automatically:
     echo   "%MODEL_ROOT%\...\%MODEL_NAME%"
     echo.
     echo Edit MODEL_ROOT / MODEL_NAME at the top of this CMD if needed.
+    del /q "%TEMPLATE%" >nul 2>&1
     pause
     exit /b 1
 )
@@ -71,15 +146,9 @@ rem ---------- Verify this is the MindControl-capable build ----------
 if errorlevel 1 (
     echo ERROR: This llama-server build does not expose --reasoning-budget-enable.
     echo Build the merged llama-mindcontrol / PR #25961 source first.
+    del /q "%TEMPLATE%" >nul 2>&1
     pause
     exit /b 1
-)
-
-rem ---------- Free VRAM used by LM Studio, if LMS CLI is available ----------
-where lms >nul 2>&1
-if not errorlevel 1 (
-    echo Unloading LM Studio models...
-    lms unload --all >nul 2>&1
 )
 
 rem ============================================================
@@ -95,8 +164,10 @@ set "LLAMA_ARG_THINK_BUDGET_MESSAGE=I have enough information to answer now.\n</
 rem Explicitly disable the optional intro injection in the command below.
 
 rem ============================================================
-rem Qwen3.8 chat-template settings
+rem Chat-template kwargs
 rem ============================================================
+rem Keep reasoning behavior explicit and stable across all template sources.
+rem This intentionally overrides any future upstream default-effort change.
 set "LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}"
 
 rem ============================================================
@@ -108,7 +179,11 @@ echo Qwen3.8-27B MindControl
 echo ============================================================
 echo Server:        "%SERVER%"
 echo Model:         "%MODEL%"
-echo Template:      embedded qwen3.8-safe-v2
+echo Template:      %TEMPLATE_LABEL%
+echo Source:        %TEMPLATE_SOURCE%
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" echo Online choice: %ONLINE_CHAT_TEMPLATE%
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" echo Live URL:      %TEMPLATE_LIVE_URL%
+echo Template mode: %TEMPLATE_KWARGS_MODE%
 echo API:           http://127.0.0.1:8080/v1
 echo Context:       120064
 echo GPU layers:    66
@@ -116,7 +191,6 @@ echo KV cache:      Q8_0 / Q8_0
 echo Temperature:   1.0
 echo Top-K:         20
 echo Top-P:         0.95
-echo Reasoning:     medium
 echo Budget:        16384
 echo Soft warning:  85%%
 echo Grace tokens:  512
@@ -130,19 +204,20 @@ rem Start llama-server
 rem ============================================================
 "%SERVER%" ^
   -m "%MODEL%" ^
+  --cache-ram 49152 ^
   --alias "qwen3.8-27b" ^
   --host 127.0.0.1 ^
   --port 8080 ^
-  -c 120064 ^
+  -c 110000 ^
   -ngl 66 ^
   -t 16 ^
   -tb 16 ^
   -b 2048 ^
-  -ub 512 ^
+  -ub 1024 ^
   -np 1 ^
   --no-kv-unified ^
-  --ctx-checkpoints 32 ^
-  --checkpoint-min-step 256 ^
+  --ctx-checkpoints 96 ^
+  --checkpoint-min-step 128 ^
   --kv-offload ^
   --load-mode mmap ^
   -fa on ^
@@ -157,24 +232,24 @@ rem ============================================================
   --presence-penalty 0.0 ^
   --frequency-penalty 0.0 ^
   --spec-type draft-mtp ^
-  --spec-draft-n-max 3 ^
+  --spec-draft-n-max 4 ^
   --spec-draft-n-min 0 ^
   --spec-draft-p-min 0.75 ^
   --spec-draft-type-k q8_0 ^
   --spec-draft-type-v q8_0 ^
-  --fit-target 8 ^
+  --fit-target 0 ^
   --jinja ^
   --chat-template-file "%TEMPLATE%" ^
   --reasoning on ^
   --reasoning-preserve ^
   --reasoning-format deepseek ^
   --reasoning-budget-intro-message ""
-rem  --log-verbose ^
-rem  --log-timestamps ^
-rem  --log-prefix ^
-rem  --log-colors off ^
-rem  --log-file "C:\GIT\llama.cpp\llama-server.log" ^
-rem  --log-prompts-dir "C:\GIT\llama.cpp\prompt-logs"
+REM  --log-verbose ^
+REM  --log-timestamps ^
+REM  --log-prefix ^
+REM  --log-colors on ^
+REM  --log-file "llama-server.log" ^
+REM  --log-prompts-dir "prompt-logs"
 
 set "RC=%ERRORLEVEL%"
 del /q "%TEMPLATE%" >nul 2>&1
@@ -183,7 +258,7 @@ echo llama-server exited with code %RC%.
 pause
 exit /b %RC%
 
-:__QWEN38_JINJA_PAYLOAD__
+:__QWEN38_SAFE_V2_BEGIN__
 {%- set template_version = "qwen3.8-safe-v2" %}
 {#- -------------------------------------------------------------------------
     Whitespace contract: every tag opener in this file carries a leading minus,
@@ -766,3 +841,4 @@ exit /b %RC%
         {{- '<think>\n' }}
     {%- endif %}
 {%- endif %}
+:__QWEN38_SAFE_V2_END__
