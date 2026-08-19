@@ -18,6 +18,7 @@ rem FETCH_LATEST_TEMPLATES_ONLINE=1.
 rem Valid values:
 rem   qwen-sharp = peculiar-ragdoll/Qwen-Sharp-Chat-Templates
 rem   froggeric  = froggeric/Qwen-Fixed-Chat-Templates
+rem   original   = official Qwen/Qwen3.8-27B chat template
 set "ONLINE_CHAT_TEMPLATE=qwen-sharp"
 rem ============================================================
 
@@ -32,8 +33,9 @@ cd /d "%~dp0"
 rem ---------- Paths ----------
 set "SERVER=%~dp0build\bin\Release\llama-server.exe"
 set "SELF=%~f0"
-set "MODEL_ROOT=%USERPROFILE%\.lmstudio\models"
-set "MODEL_NAME=Qwen3.8-27B-UD-Q4_K_XL.gguf"
+REM set "MODEL_ROOT=%USERPROFILE%\.lmstudio\models"
+set "MODEL_ROOT=E:\KI_Modelle"
+set "MODEL_NAME=Qwen3.8-27B-UD-Q5_K_XL.gguf"
 set "MODEL="
 
 rem ---------- Validate global update switch ----------
@@ -62,6 +64,9 @@ if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="qwen-
 if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="froggeric" set "TEMPLATE_LABEL=froggeric/Qwen-Fixed-Chat-Templates"
 if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="froggeric" set "TEMPLATE_LIVE_URL=https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja"
 
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="original" set "TEMPLATE_LABEL=Qwen/Qwen3.8-27B official"
+if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if /I "%ONLINE_CHAT_TEMPLATE%"=="original" set "TEMPLATE_LIVE_URL=https://huggingface.co/Qwen/Qwen3.8-27B/resolve/main/chat_template.jinja"
+
 if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if not defined TEMPLATE_LIVE_URL (
     echo ERROR: Unknown ONLINE_CHAT_TEMPLATE value:
     echo   "%ONLINE_CHAT_TEMPLATE%"
@@ -69,6 +74,7 @@ if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" if not defined TEMPLATE_LIVE_URL (
     echo Valid online values:
     echo   qwen-sharp
     echo   froggeric
+    echo   original
     pause
     exit /b 1
 )
@@ -159,7 +165,7 @@ set "LLAMA_ARG_THINK_BUDGET=16384"
 set "LLAMA_ARG_THINK_BUDGET_SOFT_RATIO=0.85"
 set "LLAMA_ARG_THINK_BUDGET_SOFT_MESSAGE=I am approaching my reasoning limit. I should consolidate the key points, resolve any remaining uncertainty, and work toward a final answer while I still have room."
 set "LLAMA_ARG_THINK_BUDGET_GRACE_TOKENS=512"
-set "LLAMA_ARG_THINK_BUDGET_MESSAGE=I have enough information to answer now.\n</think>"
+set "LLAMA_ARG_THINK_BUDGET_MESSAGE=\nI have enough information to answer now.\n</think>"
 
 rem Explicitly disable the optional intro injection in the command below.
 
@@ -200,20 +206,27 @@ echo ============================================================
 echo.
 
 rem ============================================================
+rem QWEN38_MTP_SHARED_GALLOC_POC_B10194.patch
+rem ============================================================
+set "LLAMA_Q38F_SHARED_GALLOC=1"
+
+rem ============================================================
 rem Start llama-server
 rem ============================================================
+REM  --mmproj "E:\KI_Modelle\Qwen3.8-27B-mmproj-BF16.gguf" ^
+REM  --mmproj-offload ^
 "%SERVER%" ^
   -m "%MODEL%" ^
-  --cache-ram 49152 ^
+  --cache-ram 51200 ^
   --alias "qwen3.8-27b" ^
   --host 127.0.0.1 ^
   --port 8080 ^
-  -c 110000 ^
+  -c 262144 ^
   -ngl 66 ^
   -t 16 ^
   -tb 16 ^
-  -b 2048 ^
-  -ub 1024 ^
+  -b 4096 ^
+  -ub 2048 ^
   -np 1 ^
   --no-kv-unified ^
   --ctx-checkpoints 96 ^
@@ -243,13 +256,13 @@ rem ============================================================
   --reasoning on ^
   --reasoning-preserve ^
   --reasoning-format deepseek ^
-  --reasoning-budget-intro-message ""
-REM  --log-verbose ^
-REM  --log-timestamps ^
-REM  --log-prefix ^
-REM  --log-colors on ^
-REM  --log-file "llama-server.log" ^
-REM  --log-prompts-dir "prompt-logs"
+  --reasoning-budget-intro-message "" ^
+  --log-verbose ^
+  --log-timestamps ^
+  --log-prefix ^
+  --log-colors on ^
+  --log-file "llama-server.log" ^
+  --log-prompts-dir "prompt-logs"
 
 set "RC=%ERRORLEVEL%"
 del /q "%TEMPLATE%" >nul 2>&1
