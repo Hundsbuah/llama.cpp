@@ -2383,19 +2383,6 @@ common_speculative_init_result::common_speculative_init_result(
 
     if (spec_mtp) {
         cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
-
-        // MTP compute micro-batch cap experiment.
-        // Keep n_batch unchanged because the MTP context still receives
-        // prompt batches from the target path.
-        const uint32_t n_ubatch_before = cparams.n_ubatch;
-        cparams.n_ubatch = std::min<uint32_t>(cparams.n_ubatch, 32);
-
-        LOG_INF(
-            "%s: CLEAN_MTP_UBATCH_CAP n_batch=%u n_ubatch=%u->%u\n",
-            __func__,
-            cparams.n_batch,
-            n_ubatch_before,
-            cparams.n_ubatch);
     }
 
     // note: for small models maybe we can set this to the maximum possible draft from all speculative types
