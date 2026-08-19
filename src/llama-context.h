@@ -343,6 +343,11 @@ private:
 
     ggml_backend_sched_ptr sched;
 
+    // Q38F experimental path.
+    // MTP keeps its own scheduler/backend instances but can share the
+    // target scheduler's compute graph allocator/backing buffers.
+    llama_context * q38f_shared_galloc_target = nullptr;
+
     bool sched_need_reserve = true;
 
     ggml_backend_t backend_cpu = nullptr;

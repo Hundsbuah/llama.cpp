@@ -1,4 +1,5 @@
 #include "llama-context.h"
+#include "llama-q38f-shared-galloc.h"
 
 #include "ggml.h"
 #include "llama-arch.h"
@@ -458,6 +459,27 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
         }
 
+        // Q38F_SHARED_GALLOC_D02
+        //
+        // Keep independent target/MTP schedulers and backend handles.
+        // Only the graph allocator/backing compute buffers are shared.
+        //
+        // This avoids the backend-identity violation caused by D01.
+        if (llama_q38f_shared_galloc_enabled() &&
+            model.arch_name() == "qwen35" &&
+            hparams.n_layer_nextn == 1 &&
+            cparams.n_seq_max == 1 &&
+            model.n_devices() == 1 &&
+            cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
+            params.ctx_other != nullptr &&
+            &params.ctx_other->get_model() == &model) {
+
+            q38f_shared_galloc_target = params.ctx_other;
+
+            LLAMA_LOG_WARN(
+                "Q38F_SHARED_GALLOC: MTP eligible; target/MTP schedulers stay independent\n");
+        }
+
         sched_reserve();
 
         if (!cparams.flash_attn) {
@@ -601,7 +623,34 @@ void llama_context::sched_reserve() {
     gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
 
-    sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
+    sched.reset(ggml_backend_sched_new(
+        backend_ptrs.data(),
+        backend_buft.data(),
+        backend_ptrs.size(),
+        max_nodes,
+        cparams.pipeline_parallel,
+        cparams.op_offload));
+
+    if (q38f_shared_galloc_target != nullptr) {
+        ggml_backend_sched_t target_sched =
+            q38f_shared_galloc_target->get_sched();
+
+        if (target_sched == nullptr) {
+            throw std::runtime_error(
+                "Q38F_SHARED_GALLOC: target scheduler is null");
+        }
+
+        if (!ggml_backend_sched_q38f_share_galloc(
+                sched.get(),
+                target_sched)) {
+            throw std::runtime_error(
+                "Q38F_SHARED_GALLOC: incompatible target/MTP allocators");
+        }
+
+        LLAMA_LOG_WARN(
+            "%s: Q38F_SHARED_GALLOC sharing target compute arena\n",
+            __func__);
+    }
 
     llama_memory_context_ptr mctx;
     if (memory) {
@@ -1336,7 +1385,18 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    // Q38F D03:
+    // The target and MTP have independent schedulers but share one gallocr.
+    // If ownership changed, allocator metadata belongs to the other graph and
+    // this graph must be allocated again. Consecutive calls from the same
+    // context may safely use normal graph reuse.
+    const bool q38f_galloc_owner_switched =
+        llama_q38f_shared_galloc_enabled() &&
+        ggml_backend_sched_q38f_activate_galloc(sched.get(), this);
+
+    if (!graph_reuse_disable &&
+        !q38f_galloc_owner_switched &&
+        res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running

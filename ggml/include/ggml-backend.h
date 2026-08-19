@@ -319,6 +319,19 @@ extern "C" {
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
     GGML_API void                 ggml_backend_sched_free(ggml_backend_sched_t sched);
 
+    // Q38F experimental API:
+    // schedulers remain independent; only the graph allocator and its backing
+    // compute buffers are shared. Buffer types/order must match exactly.
+    GGML_API bool ggml_backend_sched_q38f_share_galloc(
+        ggml_backend_sched_t dst,
+        ggml_backend_sched_t src);
+
+    // Returns true when the shared compute arena changed owner.
+    // On a switch the previous scheduler is synchronized first.
+    GGML_API bool ggml_backend_sched_q38f_activate_galloc(
+        ggml_backend_sched_t sched,
+        const void * owner);
+
     // Initialize backend buffers from a measure graph
     GGML_API void                 ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
     GGML_API bool                 ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph); // returns success

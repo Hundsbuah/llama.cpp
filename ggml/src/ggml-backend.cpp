@@ -772,6 +772,12 @@ struct ggml_backend_sched_split {
     struct ggml_cgraph graph;
 };
 
+struct ggml_backend_sched_q38f_galloc_state {
+    int refs;
+    ggml_backend_sched_t owner_sched;
+    const void * owner;
+};
+
 struct ggml_backend_sched {
     bool is_reset; // true if the scheduler has been reset since the last graph split
     bool is_alloc;
@@ -781,6 +787,10 @@ struct ggml_backend_sched {
     ggml_backend_t backends[GGML_SCHED_MAX_BACKENDS];
     ggml_backend_buffer_type_t bufts[GGML_SCHED_MAX_BACKENDS];
     ggml_gallocr_t galloc;
+
+    // Q38F: shared ownership and current user of the gallocr.
+    // The gallocr owns the backing compute vbuffers.
+    ggml_backend_sched_q38f_galloc_state * q38f_galloc_state;
 
     // hash map of the nodes in the graph
     struct ggml_hash_set  hash_set;
@@ -1842,11 +1852,118 @@ ggml_backend_sched_t ggml_backend_sched_new(
     }
 
     sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
+
+    sched->q38f_galloc_state =
+        (ggml_backend_sched_q38f_galloc_state *)
+        calloc(1, sizeof(ggml_backend_sched_q38f_galloc_state));
+
+    GGML_ASSERT(sched->q38f_galloc_state != nullptr);
+
+    sched->q38f_galloc_state->refs = 1;
+
     sched->op_offload = op_offload;
 
     ggml_backend_sched_reset(sched);
 
     return sched;
+}
+
+static void ggml_backend_sched_q38f_release_galloc(
+        ggml_backend_sched_t sched) {
+    if (sched == nullptr || sched->galloc == nullptr) {
+        return;
+    }
+
+    auto * state = sched->q38f_galloc_state;
+
+    GGML_ASSERT(state != nullptr);
+    GGML_ASSERT(state->refs > 0);
+
+    if (state->owner_sched == sched) {
+        state->owner_sched = nullptr;
+        state->owner = nullptr;
+    }
+
+    state->refs -= 1;
+
+    if (state->refs == 0) {
+        ggml_gallocr_free(sched->galloc);
+        free(state);
+    }
+
+    sched->galloc = nullptr;
+    sched->q38f_galloc_state = nullptr;
+}
+
+bool ggml_backend_sched_q38f_share_galloc(
+        ggml_backend_sched_t dst,
+        ggml_backend_sched_t src) {
+    if (dst == nullptr || src == nullptr || dst == src) {
+        return false;
+    }
+
+    if (dst->n_backends != src->n_backends) {
+        return false;
+    }
+
+    for (int i = 0; i < dst->n_backends; ++i) {
+        if (dst->bufts[i] != src->bufts[i]) {
+            return false;
+        }
+    }
+
+    if (dst->galloc == src->galloc) {
+        return true;
+    }
+
+    GGML_ASSERT(src->galloc != nullptr);
+    GGML_ASSERT(src->q38f_galloc_state != nullptr);
+    GGML_ASSERT(src->q38f_galloc_state->refs > 0);
+
+    ggml_backend_sched_q38f_release_galloc(dst);
+
+    dst->galloc = src->galloc;
+    dst->q38f_galloc_state = src->q38f_galloc_state;
+
+    dst->q38f_galloc_state->refs += 1;
+
+    return true;
+}
+
+bool ggml_backend_sched_q38f_activate_galloc(
+        ggml_backend_sched_t sched,
+        const void * owner) {
+    if (sched == nullptr ||
+        sched->galloc == nullptr ||
+        sched->q38f_galloc_state == nullptr) {
+        return false;
+    }
+
+    auto * state = sched->q38f_galloc_state;
+
+    // A non-shared scheduler needs no ownership invalidation.
+    if (state->refs <= 1) {
+        state->owner_sched = sched;
+        state->owner = owner;
+        return false;
+    }
+
+    if (state->owner_sched == sched &&
+        state->owner == owner) {
+        return false;
+    }
+
+    // Target and MTP execute sequentially in Q38F. Before the other scheduler
+    // reuses the same backing arena, make sure previous async work is complete.
+    if (state->owner_sched != nullptr &&
+        state->owner_sched != sched) {
+        ggml_backend_sched_synchronize(state->owner_sched);
+    }
+
+    state->owner_sched = sched;
+    state->owner = owner;
+
+    return true;
 }
 
 void ggml_backend_sched_free(ggml_backend_sched_t sched) {
@@ -1858,7 +1975,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
             ggml_backend_event_free(sched->events[b][c]);
         }
     }
-    ggml_gallocr_free(sched->galloc);
+    ggml_backend_sched_q38f_release_galloc(sched);
     ggml_free(sched->ctx);
     ggml_hash_set_free(&sched->hash_set);
     for (int i = 0; i < sched->splits_capacity; i++) {
