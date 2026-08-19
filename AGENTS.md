@@ -1,26 +1,18 @@
-# Instructions for llama.cpp
-
-> [!IMPORTANT]
->
-> AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.
->
-> Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
-
----
-
 ## Graphify
 
 This project has a Graphify knowledge graph at `graphify-out/`.
 
 ### Mandatory Graphify-first rule
 
-- For ANY codebase, architecture, dependency, cross-file, call-flow, unfamiliar-code, or repository-structure question, if `graphify-out/graph.json` exists, FIRST use Graphify before broad source-code exploration.
+- If `graphify-out/graph.json` exists, FIRST use Graphify for questions that require repository orientation, architecture, dependencies, cross-file relationships, call flow, unfamiliar-code exploration, or repository structure.
+- This rule does not require Graphify first when the user explicitly names a specific file or the task is clearly confined to already-identified files/symbols and requires no broader repository understanding.
 - Prefer the narrowest applicable Graphify command:
   - `graphify query "<question>"`
   - `graphify explain "<concept>"`
   - `graphify path "<A>" "<B>"`
-- Graphify queries are the primary repository-orientation mechanism. Do not begin such tasks with broad grep, recursive search, mass file reads, or directory-by-directory exploration when a usable graph exists.
+- Graphify queries are the primary repository-orientation mechanism. Do not begin applicable tasks with broad grep, recursive search, mass file reads, or directory-by-directory exploration when a usable graph exists.
 - Use the Graphify result to identify the smallest relevant set of files and symbols, then inspect those actual source files as needed.
+- For Graphify-specific workflows or syntax beyond simple query/path/explain, use the installed `graphify` skill as the authoritative Graphify instructions rather than inventing commands.
 
 ### Graph navigation
 
@@ -35,21 +27,34 @@ Direct repository inspection is allowed when:
 - `graphify-out/graph.json` does not exist;
 - Graphify is unavailable or fails;
 - Graphify does not provide enough information;
-- an exact implementation detail must be verified in a file already identified by Graphify;
-- the user explicitly names a specific file to inspect.
+- the graph is stale for files relevant to the task;
+- an exact implementation detail must be verified;
+- the user explicitly names a specific file to inspect;
+- the task is already confined to identified files/symbols and requires no broader repository exploration.
 
 When falling back from Graphify, keep repository exploration targeted rather than performing unnecessary broad scans.
 
 ### Verification
 
 - Graphify is an orientation and relationship tool, not a substitute for reading the actual implementation.
-- Verify important implementation details against the source files identified by Graphify before modifying code.
+- Verify important implementation details against the source files identified by Graphify before modifying code or making correctness claims.
 - Do not treat inferred graph relationships as proof of runtime behavior.
+- If relevant code changed after the graph was last updated, refresh the graph before relying on it for subsequent cross-file or repository-wide reasoning.
 
 ### Graph maintenance
 
-- After modifying code files, run `graphify update .` to keep the graph synchronized.
-- If installed Graphify Git hooks have already updated the graph successfully, do not perform a redundant update.
+- After completing a coherent batch of code changes, run `graphify update .` once before using the graph again or before final repository-wide verification.
+- If installed Graphify Git hooks have already updated the graph successfully for those changes, do not perform a redundant update.
+
+# Instructions for llama.cpp
+
+> [!IMPORTANT]
+>
+> AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.
+>
+> Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+---
 
 ## Guidelines for Contributors
 
