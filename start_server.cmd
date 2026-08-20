@@ -33,7 +33,6 @@ cd /d "%~dp0"
 rem ---------- Paths ----------
 set "SERVER=%~dp0build\bin\Release\llama-server.exe"
 set "SELF=%~f0"
-REM set "MODEL_ROOT=%USERPROFILE%\.lmstudio\models"
 set "MODEL_ROOT=E:\KI_Modelle"
 set "MODEL_NAME=Qwen3.8-27B-UD-Q5_K_XL.gguf"
 set "MODEL="
@@ -160,10 +159,10 @@ if errorlevel 1 (
 rem ============================================================
 rem MindControl
 rem ============================================================
-set "LLAMA_ARG_THINK_BUDGET_ENABLE=1"
+set "LLAMA_ARG_THINK_BUDGET_ENABLE=0"
 set "LLAMA_ARG_THINK_BUDGET=16384"
 set "LLAMA_ARG_THINK_BUDGET_SOFT_RATIO=0.85"
-set "LLAMA_ARG_THINK_BUDGET_SOFT_MESSAGE=I am approaching my reasoning limit. I should consolidate the key points, resolve any remaining uncertainty, and work toward a final answer while I still have room."
+set "LLAMA_ARG_THINK_BUDGET_SOFT_MESSAGE= I am well into my reasoning budget, but I still have room to work. I should focus on the most important unresolved points, verify key assumptions, and continue the analysis efficiently."
 set "LLAMA_ARG_THINK_BUDGET_GRACE_TOKENS=512"
 set "LLAMA_ARG_THINK_BUDGET_MESSAGE=\nI have enough information to answer now.\n</think>"
 
@@ -191,17 +190,6 @@ if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" echo Online choice: %ONLINE_CHAT_TEMPL
 if "%FETCH_LATEST_TEMPLATES_ONLINE%"=="1" echo Live URL:      %TEMPLATE_LIVE_URL%
 echo Template mode: %TEMPLATE_KWARGS_MODE%
 echo API:           http://127.0.0.1:8080/v1
-echo Context:       120064
-echo GPU layers:    66
-echo KV cache:      Q8_0 / Q8_0
-echo Temperature:   1.0
-echo Top-K:         20
-echo Top-P:         0.95
-echo Budget:        16384
-echo Soft warning:  85%%
-echo Grace tokens:  512
-echo Fit target:     8 MiB
-echo Intro message: disabled
 echo ============================================================
 echo.
 
@@ -226,7 +214,7 @@ REM  --mmproj-offload ^
   -t 16 ^
   -tb 16 ^
   -b 4096 ^
-  -ub 2048 ^
+  -ub 1024 ^
   -np 1 ^
   --no-kv-unified ^
   --ctx-checkpoints 96 ^
@@ -245,9 +233,9 @@ REM  --mmproj-offload ^
   --presence-penalty 0.0 ^
   --frequency-penalty 0.0 ^
   --spec-type draft-mtp ^
-  --spec-draft-n-max 4 ^
+  --spec-draft-n-max 6 ^
   --spec-draft-n-min 0 ^
-  --spec-draft-p-min 0.75 ^
+  --spec-draft-p-min 0.77 ^
   --spec-draft-type-k q8_0 ^
   --spec-draft-type-v q8_0 ^
   --fit-target 0 ^
@@ -256,13 +244,13 @@ REM  --mmproj-offload ^
   --reasoning on ^
   --reasoning-preserve ^
   --reasoning-format deepseek ^
-  --reasoning-budget-intro-message "" ^
-  --log-verbose ^
-  --log-timestamps ^
-  --log-prefix ^
-  --log-colors on ^
-  --log-file "llama-server.log" ^
-  --log-prompts-dir "prompt-logs"
+  --reasoning-budget-intro-message ""
+REM  --log-verbose ^
+REM  --log-timestamps ^
+REM  --log-prefix ^
+REM  --log-colors on ^
+REM  --log-file "llama-server.log" ^
+REM  --log-prompts-dir "prompt-logs"
 
 set "RC=%ERRORLEVEL%"
 del /q "%TEMPLATE%" >nul 2>&1
