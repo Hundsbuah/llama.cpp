@@ -1157,12 +1157,13 @@ public:
         return storage ? storage->data() : nullptr;
     }
 
-    // Allocate fresh storage for a complete state snapshot. Copies of this
-    // object keep referencing the previous immutable snapshot; they are never
-    // modified in place. Only the newly allocated, uniquely owned buffer is
-    // exposed as mutable while the caller captures the replacement snapshot.
+    // Reuse uniquely owned storage; detach before modifying a shared snapshot.
     uint8_t * reset(size_t n) {
-        storage = std::make_shared<std::vector<uint8_t>>(n);
+        if (!storage || storage.use_count() != 1) {
+            storage = std::make_shared<std::vector<uint8_t>>(n);
+        } else {
+            storage->resize(n);
+        }
         return storage->data();
     }
 
