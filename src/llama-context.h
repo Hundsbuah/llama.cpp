@@ -347,6 +347,7 @@ private:
     // MTP keeps its own scheduler/backend instances but can share the
     // target scheduler's compute graph allocator/backing buffers.
     llama_context * q38f_shared_galloc_target = nullptr;
+    uint64_t q38f_graph_galloc_generation = UINT64_MAX;
 
     bool sched_need_reserve = true;
 

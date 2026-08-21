@@ -1385,18 +1385,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    // Q38F D03:
-    // The target and MTP have independent schedulers but share one gallocr.
-    // If ownership changed, allocator metadata belongs to the other graph and
-    // this graph must be allocated again. Consecutive calls from the same
-    // context may safely use normal graph reuse.
-    const bool q38f_galloc_owner_switched =
-        llama_q38f_shared_galloc_enabled() &&
-        ggml_backend_sched_q38f_activate_galloc(sched.get(), this);
+    const bool q38f_galloc_shared = ggml_backend_sched_q38f_galloc_is_shared(sched.get());
+    bool q38f_graph_valid = true;
 
-    if (!graph_reuse_disable &&
-        !q38f_galloc_owner_switched &&
-        res->can_reuse(gparams)) {
+    if (q38f_galloc_shared) {
+        ggml_backend_sched_q38f_activate_galloc(sched.get(), this);
+        q38f_graph_valid = q38f_graph_galloc_generation == ggml_backend_sched_q38f_galloc_generation(sched.get());
+    }
+
+    if (!graph_reuse_disable && q38f_graph_valid && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1429,6 +1426,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
+        }
+
+        if (q38f_galloc_shared) {
+            q38f_graph_galloc_generation = ggml_backend_sched_q38f_galloc_generation(sched.get());
         }
     }
 

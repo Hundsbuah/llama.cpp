@@ -332,6 +332,9 @@ extern "C" {
         ggml_backend_sched_t sched,
         const void * owner);
 
+    GGML_API bool     ggml_backend_sched_q38f_galloc_is_shared(ggml_backend_sched_t sched);
+    GGML_API uint64_t ggml_backend_sched_q38f_galloc_generation(ggml_backend_sched_t sched);
+
     // Initialize backend buffers from a measure graph
     GGML_API void                 ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
     GGML_API bool                 ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph); // returns success

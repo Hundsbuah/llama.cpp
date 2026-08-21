@@ -1978,6 +1978,16 @@ bool ggml_backend_sched_q38f_activate_galloc(
     return true;
 }
 
+bool ggml_backend_sched_q38f_galloc_is_shared(ggml_backend_sched_t sched) {
+    return sched != nullptr && sched->q38f_galloc_state != nullptr && sched->q38f_galloc_state->refs > 1;
+}
+
+uint64_t ggml_backend_sched_q38f_galloc_generation(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched != nullptr);
+    GGML_ASSERT(sched->galloc != nullptr);
+    return ggml_gallocr_get_buffer_generation(sched->galloc);
+}
+
 void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     if (sched == NULL) {
         return;
